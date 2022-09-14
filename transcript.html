@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+
+<head>
+    <meta name="robots" content="noindex" />
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title></title>
+    <meta name="Transcript" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="">
+    <link
+        href="https://dhqbrvplips7x.cloudfront.net/common-ui-docs/genesys-webcomponents/3.8.1-178/genesys-webcomponents/genesys-webcomponents.css"
+        rel="stylesheet">
+    <script type="module"
+        src="https://dhqbrvplips7x.cloudfront.net/common-ui-docs/genesys-webcomponents/3.8.1-178/genesys-webcomponents/genesys-webcomponents.esm.js"></script>
+    <script src="https://sdk-cdn.mypurecloud.com/javascript/146.0.0/purecloud-platform-client-v2.min.js"></script>
+</head>
+
+<body onload="start()">
+    <gux-accordion-section>
+        <h2 slot="header">knowledge</h2>
+        <div slot="content" id="knowledge" style="max-height: 42vh; overflow: hidden; overflow-y: scroll;"></div>
+    </gux-accordion-section>
+    <gux-accordion-section>
+        <h2 slot="header">Transcript</h2>
+        <div slot="content" id="messages" style="max-height: 42vh; overflow: hidden; overflow-y: scroll;"></div>
+    </gux-accordion-section>
+    <script>
+        let debug = true //localStorage.getItem('gc_debug') //Enables user to set debug mode
+        let gc_region = getParameterByName('gc_region')
+        let gc_clientId = getParameterByName('gc_clientId')
+        let gc_redirectUrl = getParameterByName('gc_redirectUrl')
+        let gc_conversationId = getParameterByName('gc_conversationId')
+        let gc_deploymentId = getParameterByName('gc_deploymentId')
+        let sessionId
+
+        //Getting and setting the GC details from dynamic URL and session storage
+        if (gc_region) {
+            sessionStorage.setItem('gc_region', gc_region)
+            if (debug) console.log('gc_region Saved: ', gc_region)
+        } else {
+            gc_region = sessionStorage.getItem('gc_region')
+            if (debug) console.log('gc_region retreived: ', gc_region)
+        }
+        if (gc_clientId) {
+            sessionStorage.setItem('gc_clientId', gc_clientId)
+            if (debug) console.log('gc_clientId Saved: ', gc_clientId)
+        } else {
+            gc_clientId = sessionStorage.getItem('gc_clientId')
+            if (debug) console.log('gc_clientId retreived: ', gc_clientId)
+        }
+        if (gc_redirectUrl) {
+            sessionStorage.setItem('gc_redirectUrl', gc_redirectUrl)
+            if (debug) console.log('gc_redirectUrl Saved: ', gc_redirectUrl)
+        } else {
+            gc_redirectUrl = sessionStorage.getItem('gc_redirectUrl')
+            if (debug) console.log('gc_redirectUrl retreived: ', gc_redirectUrl)
+        }
+        if (gc_conversationId) {
+            sessionStorage.setItem('gc_conversationId', gc_conversationId)
+            if (debug) console.log('gc_conversationId Saved: ', gc_conversationId)
+        } else {
+            gc_conversationId = sessionStorage.getItem('gc_conversationId')
+            if (debug) console.log('gc_conversationId retreived: ', gc_conversationId)
+        }
+        if (gc_deploymentId) {
+            sessionStorage.setItem('gc_deploymentId', gc_deploymentId)
+            if (debug) console.log('gc_deploymentId Saved: ', gc_deploymentId)
+        } else {
+            gc_deploymentId = sessionStorage.getItem('gc_deploymentId')
+            if (debug) console.log('gc_deploymentId retreived: ', gc_deploymentId)
+        }
+
+        let platformClient = require('platformClient');
+        const client = platformClient.ApiClient.instance
+        const napi = new platformClient.NotificationsApi()
+        const uapi = new platformClient.UsersApi()
+        const kapi = new platformClient.KnowledgeApi()
+
+        async function start() {
+            try {
+                client.setEnvironment(gc_region)
+                client.setPersistSettings(true, '_mm_')
+
+                if (debug) console.log('Logging in to Genesys Cloud')
+                await client.loginImplicitGrant(gc_clientId, gc_redirectUrl, {})
+
+                let user = await uapi.getUsersMe({})
+                console.log(user)
+                let userId = user.id
+
+                //Create Guest Session to search Support Center
+                let session = await kapi.postKnowledgeGuestSessions({
+                    app: {
+                        deploymentId: gc_deploymentId,
+                        type: "SupportCenter"
+                    },
+                    customerId: userId
+                })
+
+                if (debug) console.log('SessionId: ', session.id)
+                sessionId = session.id
+
+                try {
+                    //Need to store wss as only can have 15 per agent. Also bad practice to create multiply
+                    if (sessionStorage.getItem("_gc_channelid") != null) {
+                        if (debug) console.log('channelid already exists...')
+                        if (debug) console.log(sessionStorage.getItem("_gc_channelid"))
+                        var channelid = sessionStorage.getItem("_gc_channelid")
+
+                        let transcriptTopic = `v2.conversations.${gc_conversationId}.transcription`
+                        await napi.postNotificationsChannelSubscriptions(channelid, [{
+                            id: transcriptTopic
+                        }])
+                        if (debug) console.log(`Subscribed to topic ${transcriptTopic}`)
+                    }
+                    if (sessionStorage.getItem("_gc_channelid") === null) {
+                        let channel = await napi.postNotificationsChannels()
+                        if (debug) console.log('Created Notification Channel: ', channel)
+
+                        let transcriptTopic = `v2.conversations.${gc_conversationId}.transcription`
+                        await napi.postNotificationsChannelSubscriptions(channel.id, [{
+                            id: transcriptTopic
+                        }])
+                        if (debug) console.log(`Subscribed to topic ${transcriptTopic}`)
+                        sessionStorage.setItem("_gc_channelid", channel.id)
+                        if (debug) console.log(sessionStorage.getItem("_gc_channelid"))
+                    }
+
+
+
+                } catch (err) {
+                    console.error('Notification Error: ', err)
+                }
+
+                //Create websocket for events
+                try {
+                    let socket = new WebSocket(`wss://streaming.${gc_region}/channels/${sessionStorage.getItem("_gc_channelid")}`)
+
+                    socket.onmessage = async function (event) {
+                        let details = JSON.parse(event.data)
+
+                        //if Call notification
+                        if ((details.topicName).includes("transcription")) {
+                            if (debug) console.log('Transcript Notification: ', details)
+                            try {
+                                for (const alternatives of details.eventBody.transcripts) {
+                                    if (debug) console.log('step-1')
+                                    if (debug) console.log(alternatives)
+                                    for (const words of alternatives.alternatives) {
+                                        if (debug) console.log(words)
+                                        var user = alternatives.channel
+                                        var text = ''
+                                        for (const word of words.words) {
+                                            if (debug) console.log('word: ', word.word)
+                                            if (debug) console.log('confidence: ', word.confidence)
+                                            if (.5 < word.confidence) {
+                                                text = text + ' ' + word.word
+                                            }
+                                        }
+                                        if (user === 'INTERNAL') {
+                                            createAgentMsg('agent', text, null)
+                                            searchKB(text)
+                                        } else {
+                                            createCustomerMsg('customer', text, null)
+                                            searchKB(text)
+                                        }
+                                    }
+                                }
+
+                            } catch (err) {
+                                if (err.toString().includes('details.eventBody.transcripts is not iterable')) {
+                                    //do nothing even message
+                                } else {
+                                    console.log('Error: ', err)
+                                }
+                            }
+                        }
+                    }
+                    if (debug) console.log(`Waiting for events on wss://streaming.${gc_region}/channels/${sessionStorage.getItem("_gc_channelid")}`)
+                } catch (err) {
+                    console.error('Websocket error: ', err)
+                }
+            } //End of loaded section
+            catch (err) {
+                console.error('Error: ', err)
+            }
+        }   //End of Start Function
+
+        function createCustomerMsg(from, message, time) {
+            //Build out HTML Elements for customer
+            if (debug) console.log('customer')
+            var div = document.createElement("div")
+            var card = document.createElement("gux-card-beta")
+            var text = document.createElement("p")
+            var spacerTop = document.createElement("br")
+            card.style = "width: auto; background-color: antiquewhite;"
+            card.setAttribute("accent", "raised")
+            text.innerHTML = message
+            card.appendChild(text)
+            div.appendChild(spacerTop)
+            div.appendChild(card)
+            document.getElementById("messages").appendChild(div)
+            document.getElementById('messages').scrollTo(0, document.getElementById('messages').scrollHeight)
+        }
+
+        function createAgentMsg(from, message, time) {
+            //Build out HTML Elements for agent
+            if (debug) console.log('other')
+            var div = document.createElement("div")
+            var card = document.createElement("gux-card-beta")
+            var text = document.createElement("p")
+            var spacerTop = document.createElement("br")
+            card.style = "width: auto; align-items: flex-end; background-color: aliceblue;"
+            card.setAttribute("accent", "raised")
+            text.innerHTML = message
+            card.appendChild(text)
+            div.appendChild(spacerTop)
+            div.appendChild(card)
+            document.getElementById("messages").appendChild(div)
+            setTimeout(function () {
+                document.getElementById('messages').scrollTo(0, document.getElementById('messages').scrollHeight)
+            }, 1000)
+        }
+
+        async function renderKB(message, confidence) {
+            var divOuter = document.createElement("div")
+            var card = document.createElement("gux-card-beta")
+            var text = document.createElement("p")
+            var spacerTop = document.createElement("br")
+            var spacer = document.createElement("br")
+            var div = document.createElement("div")
+            var buttonUp = document.createElement("gux-button")
+            var upIcon = document.createElement("gux-icon")
+            var buttonDown = document.createElement("gux-button")
+            var downIcon = document.createElement("gux-icon")
+            var conf = document.createElement("p")
+            card.style = "width: auto"
+            card.setAttribute("accent", "raised")
+            text.innerText = message
+            div.style = "display: inline"
+            upIcon.setAttribute("screenreader-text", "thumbs up")
+            upIcon.setAttribute("icon-name", "thumbs-up")
+            buttonUp.style = "padding-right: 8px"
+            downIcon.setAttribute("screenreader-text", "thumbs down")
+            downIcon.setAttribute("icon-name", "thumbs-down")
+            buttonDown.style = "padding-right: 8px"
+            buttonUp.append(upIcon)
+            buttonDown.append(downIcon)
+            conf.innerText = "Confidence: " + confidence
+            div.append(buttonUp)
+            div.append(buttonDown)
+            div.append(conf)
+            card.append(text)
+            card.append(spacer)
+            card.append(div)
+            divOuter.appendChild(spacerTop)
+            divOuter.appendChild(card)
+            document.getElementById("knowledge").appendChild(divOuter)
+            setTimeout(function () {
+                document.getElementById('knowledge').scrollTo(0, document.getElementById('knowledge').scrollHeight)
+            }, 1000)
+        }
+
+        async function searchKB(message) {
+            let opts = {
+                body: {
+                    query: message,
+                    pageSize: 1,
+                    pageNumber: 1
+                }
+            }
+            let kbQuery = await kapi.postKnowledgeGuestSessionDocumentsSearch(sessionId, opts) //send search query to get documentIds
+
+            if (kbQuery.total > 0) {
+                console.log(kbQuery)
+                let kbAnswer = await kapi.getKnowledgeGuestSessionDocument(sessionId, kbQuery.results[0].document.id)
+                console.log(kbAnswer)
+
+                console.log('confidence: ', (kbQuery.results[0].confidence).toFixed(2))
+                if(.5 < kbQuery.results[0].confidence){
+                    renderKB(kbAnswer.variations[0].body.blocks[0].paragraph.blocks[0].text.text, (kbQuery.results[0].confidence).toFixed(2))
+                }
+            }
+        }
+        //JavaScript Native way to get Url Parameters for config
+        function getParameterByName(name, url) {
+            if (!url) url = window.location.href;
+            name = name.replace(/[\[\]]/g, '\\$&');
+            var regex = new RegExp('[?&]' + name + '(=([^&#]*)|&|#|$)'),
+                results = regex.exec(url);
+            if (!results) return null;
+            if (!results[2]) return '';
+            return decodeURIComponent(results[2].replace(/\+/g, ' '));
+        }
+    </script>
+
+</body>
+
+</html>
